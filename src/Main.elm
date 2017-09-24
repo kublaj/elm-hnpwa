@@ -1,5 +1,6 @@
-module Main exposing (..)
+port module Main exposing (..)
 
+import Dict
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick, onWithOptions)
@@ -13,6 +14,27 @@ import Route exposing (..)
 import Svg
 import Svg.Attributes as SA
 import Task
+
+
+port getPage : String -> Cmd msg
+
+
+port getItem : Int -> Cmd msg
+
+
+
+-- port gotPageList : (List Int -> msg) -> Sub msg
+
+
+port gotId : (Int -> msg) -> Sub msg
+
+
+subscriptions : Model -> Sub Msg
+subscriptions model =
+    Sub.batch
+        -- [ gotPageList GotPageList
+        [ gotId GotId
+        ]
 
 
 main : Program Never Model Msg
@@ -31,6 +53,7 @@ type alias Model =
     , item : RemoteData Item
     , user : RemoteData User
     , routesPreFetched : Bool
+    , items : Dict.Dict Int (RemoteData Item)
     }
 
 
@@ -46,6 +69,7 @@ init location =
         , item = NotAsked
         , user = NotAsked
         , routesPreFetched = False
+        , items = Dict.empty
         }
 
 
@@ -60,6 +84,8 @@ type Msg
     | GotItem (RemoteData Item)
     | GotUser (RemoteData User)
     | PreFetched
+      -- | GotPageList (List Int)
+    | GotId Int
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -89,6 +115,29 @@ update msg model =
 
         PreFetched ->
             { model | routesPreFetched = True } ! []
+
+        -- GotPageList xs ->
+        --     let
+        --         firstPage =
+        --             List.take 30 xs
+        --         items =
+        --             List.foldl (flip Dict.insert Loading) model.items firstPage
+        --     in
+        --     { model | items = items } ! itemsAdded items
+        GotId x ->
+            { model | items = Dict.insert x Loading model.items } ! []
+
+
+itemsAdded items =
+    Dict.foldl
+        (\k v acc ->
+            if v == Loading then
+                getItem k :: acc
+            else
+                acc
+        )
+        []
+        items
 
 
 
@@ -343,7 +392,7 @@ toRequest model =
                     { model | item = Loading } ! [ requestItem x ]
 
         _ ->
-            { model | feed = Loading } ! [ requestFeed model.route ]
+            { model | feed = Loading } ! [ getPage "topstories" ]
 
 
 itemFromFeed : Int -> List Item -> RemoteData Item
