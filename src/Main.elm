@@ -15,6 +15,9 @@ import Svg
 import Svg.Attributes as SA
 
 
+-- PORTS
+
+
 port requestFeed : String -> Cmd msg
 
 
@@ -30,14 +33,6 @@ port feedSubscription : ({ feed : String, data : List Int } -> msg) -> Sub msg
 port itemSubscription : (Value -> msg) -> Sub msg
 
 
-subscriptions : Model -> Sub Msg
-subscriptions model =
-    Sub.batch
-        [ feedSubscription GotFeed
-        , itemSubscription decodeItem
-        ]
-
-
 main : Program Never Model Msg
 main =
     Navigation.program UrlChange
@@ -51,8 +46,6 @@ main =
 type alias Model =
     { route : Route
     , feeds : Dict.Dict String (List Int)
-    , item : RemoteData Item
-    , user : RemoteData User
     , items : Dict.Dict Int (RemoteData Item)
     }
 
@@ -66,8 +59,6 @@ init location =
     toRequest
         { route = parseLocation location
         , feeds = Dict.empty
-        , item = NotAsked
-        , user = NotAsked
         , items = Dict.empty
         }
 
@@ -97,22 +88,33 @@ update msg model =
                 firstPage =
                     List.take 30 data
 
-                items =
-                    List.foldl (flip Dict.insert Loading) model.items firstPage
+                subscribeTo =
+                    List.filter (not << flip Dict.member model.items) firstPage
+
+                newItems =
+                    List.foldl (\x -> Dict.insert x (Requested x)) model.items subscribeTo
             in
             { model
                 | feeds = Dict.insert feed data model.feeds
-                , items = items
+                , items = newItems
             }
-                ! itemsAdded firstPage
+                ! itemsAdded subscribeTo
 
         GotItem item ->
             { model | items = Dict.insert (remoteDataItemId item) item model.items } ! []
 
 
+subscriptions : Model -> Sub Msg
+subscriptions model =
+    Sub.batch
+        [ feedSubscription GotFeed
+        , itemSubscription decodeItem
+        ]
+
+
 remoteDataItemId remoteData =
     case remoteData of
-        Success x ->
+        Subscribed x ->
             .id x
 
         _ ->
@@ -128,21 +130,25 @@ itemsAdded items =
 
 
 view : Model -> Html Msg
-view { route, feeds, item, user, items } =
+view { route, feeds, items } =
     let
         routeView =
             case route of
                 NotFound ->
                     notFoundView
 
-                ItemRoute _ ->
-                    handleViewState itemView item
+                ItemRoute id ->
+                    case fromItems id items of
+                        Subscribed x ->
+                            itemView x
 
-                User _ ->
-                    handleViewState userView user
+                        _ ->
+                            loadingView
 
+                -- User name ->
+                --     handleViewState userView name
                 _ ->
-                    listView (fromItems route feeds items)
+                    listView (listFromItems route feeds items)
     in
     main_ []
         [ headerView route
@@ -155,9 +161,14 @@ feedAtRoute feed route =
         |> Maybe.withDefault []
 
 
-fromItems route feeds items =
+listFromItems route feeds items =
     feedAtRoute feeds route
         |> List.filterMap (\x -> Dict.get x items)
+
+
+fromItems id items =
+    Dict.get id items
+        |> Maybe.withDefault NotAsked
 
 
 
@@ -192,21 +203,23 @@ listView feed =
 listViewItem : Int -> RemoteData Item -> ( String, Html Msg )
 listViewItem index item =
     case item of
-        Success item ->
+        Subscribed item ->
             ( toString item.id
             , li []
-                [ aside [] [ text (toString (index + 1)) ]
+                [ aside [] [ text (toString item.points) ]
                 , div []
                     [ itemUrl item.id item.url item.title
                     , span [ class "domain" ] [ text "" ]
                     , itemFooter item
-                    , text (toString item.id)
                     ]
                 ]
             )
 
+        Requested id ->
+            ( toString id, li [] [ text "requested" ] )
+
         _ ->
-            ( "", div [] [] )
+            ( "", text "" )
 
 
 itemUrl : Int -> String -> String -> Html Msg
@@ -247,7 +260,7 @@ itemFooter item =
             , link (Route.User item.user) [ text item.user ]
 
             -- , text (" " ++ item.timeAgo ++ " | ")
-            -- , link (Route.ItemRoute item.id) [ text (toString item.commentsCount ++ " comments") ]
+            , link (Route.ItemRoute item.id) [ text " link" ]
             ]
 
 
@@ -299,16 +312,13 @@ handleViewState successView remoteData =
         NotAsked ->
             loadingView
 
-        Loading ->
+        Requested _ ->
             loadingView
 
         Failure ->
             errorView
 
-        Updating x ->
-            div [] [ loadingView, successView x ]
-
-        Success x ->
+        Subscribed x ->
             successView x
 
 
@@ -353,31 +363,22 @@ getComments x =
 
 
 toRequest : Model -> ( Model, Cmd Msg )
-toRequest model =
-    case model.route of
+toRequest ({ route, feeds, items } as model) =
+    case route of
         NotFound ->
-            model ! []
-
-        User x ->
-            { model | user = Loading } ! [ requestUser x ]
+            ( model, Cmd.none )
 
         ItemRoute x ->
-            { model | item = Loading } ! [ requestItem x ]
+            if Dict.member x items then
+                ( model, Cmd.none )
+            else
+                ( model, requestItem x )
 
         _ ->
-            model ! [ requestFeed (Route.toApi model.route) ]
-
-
-itemFromFeed : Int -> List Item -> RemoteData Item
-itemFromFeed id feed =
-    let
-        matchId x item acc =
-            if item.id == x then
-                Updating item
+            if Dict.member (Route.toApi route) feeds then
+                ( model, Cmd.none )
             else
-                acc
-    in
-    List.foldl (matchId id) NotAsked feed
+                ( model, requestFeed (Route.toApi route) )
 
 
 
@@ -387,7 +388,7 @@ itemFromFeed id feed =
 decodeItem item =
     case decodeValue itemDecoder item of
         Ok item ->
-            GotItem (Success item)
+            GotItem (Subscribed item)
 
         Err _ ->
             GotItem Failure
@@ -425,10 +426,9 @@ decodeComments =
 
 type RemoteData a
     = NotAsked
-    | Loading
+    | Requested Int
     | Failure
-    | Updating a
-    | Success a
+    | Subscribed a
 
 
 type alias Item =
