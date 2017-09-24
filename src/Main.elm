@@ -4,7 +4,7 @@ import Dict
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (onClick, onWithOptions)
-import Http exposing (Error(..), get, send)
+import Html.Keyed as Keyed exposing (..)
 import Json.Decode as D exposing (..)
 import Json.Decode.Pipeline as P exposing (decode, optional, required)
 import Markdown exposing (toHtml)
@@ -13,27 +13,28 @@ import Result exposing (..)
 import Route exposing (..)
 import Svg
 import Svg.Attributes as SA
-import Task
 
 
-port getPage : String -> Cmd msg
+port requestFeed : String -> Cmd msg
 
 
-port getItem : Int -> Cmd msg
+port requestItem : Int -> Cmd msg
 
 
+port requestUser : String -> Cmd msg
 
--- port gotPageList : (List Int -> msg) -> Sub msg
+
+port feedSubscription : ({ feed : String, data : List Int } -> msg) -> Sub msg
 
 
-port gotId : (Int -> msg) -> Sub msg
+port itemSubscription : (Value -> msg) -> Sub msg
 
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
     Sub.batch
-        -- [ gotPageList GotPageList
-        [ gotId GotId
+        [ feedSubscription GotFeed
+        , itemSubscription decodeItem
         ]
 
 
@@ -43,16 +44,15 @@ main =
         { init = init
         , view = view
         , update = update
-        , subscriptions = \_ -> Sub.none
+        , subscriptions = subscriptions
         }
 
 
 type alias Model =
     { route : Route
-    , feed : RemoteData (List Item)
+    , feeds : Dict.Dict String (List Int)
     , item : RemoteData Item
     , user : RemoteData User
-    , routesPreFetched : Bool
     , items : Dict.Dict Int (RemoteData Item)
     }
 
@@ -65,10 +65,9 @@ init : Navigation.Location -> ( Model, Cmd Msg )
 init location =
     toRequest
         { route = parseLocation location
-        , feed = NotAsked
+        , feeds = Dict.empty
         , item = NotAsked
         , user = NotAsked
-        , routesPreFetched = False
         , items = Dict.empty
         }
 
@@ -80,12 +79,8 @@ init location =
 type Msg
     = NewUrl String
     | UrlChange Location
-    | GotFeed (RemoteData (List Item))
+    | GotFeed { feed : String, data : List Int }
     | GotItem (RemoteData Item)
-    | GotUser (RemoteData User)
-    | PreFetched
-      -- | GotPageList (List Int)
-    | GotId Int
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -97,47 +92,35 @@ update msg model =
         UrlChange location ->
             toRequest { model | route = parseLocation location }
 
-        GotFeed x ->
+        GotFeed { feed, data } ->
             let
-                cmd =
-                    if model.routesPreFetched then
-                        Cmd.none
-                    else
-                        requestOterRoutes model.route
+                firstPage =
+                    List.take 30 data
+
+                items =
+                    List.foldl (flip Dict.insert Loading) model.items firstPage
             in
-            { model | feed = x } ! [ cmd ]
+            { model
+                | feeds = Dict.insert feed data model.feeds
+                , items = items
+            }
+                ! itemsAdded firstPage
 
-        GotItem x ->
-            { model | item = x } ! []
+        GotItem item ->
+            { model | items = Dict.insert (remoteDataItemId item) item model.items } ! []
 
-        GotUser x ->
-            { model | user = x } ! []
 
-        PreFetched ->
-            { model | routesPreFetched = True } ! []
+remoteDataItemId remoteData =
+    case remoteData of
+        Success x ->
+            .id x
 
-        -- GotPageList xs ->
-        --     let
-        --         firstPage =
-        --             List.take 30 xs
-        --         items =
-        --             List.foldl (flip Dict.insert Loading) model.items firstPage
-        --     in
-        --     { model | items = items } ! itemsAdded items
-        GotId x ->
-            { model | items = Dict.insert x Loading model.items } ! []
+        _ ->
+            0
 
 
 itemsAdded items =
-    Dict.foldl
-        (\k v acc ->
-            if v == Loading then
-                getItem k :: acc
-            else
-                acc
-        )
-        []
-        items
+    List.map requestItem items
 
 
 
@@ -145,7 +128,7 @@ itemsAdded items =
 
 
 view : Model -> Html Msg
-view { route, feed, item, user } =
+view { route, feeds, item, user, items } =
     let
         routeView =
             case route of
@@ -159,12 +142,22 @@ view { route, feed, item, user } =
                     handleViewState userView user
 
                 _ ->
-                    handleViewState listView feed
+                    listView (fromItems route feeds items)
     in
     main_ []
         [ headerView route
         , routeView
         ]
+
+
+feedAtRoute feed route =
+    Dict.get (Route.toApi route) feed
+        |> Maybe.withDefault []
+
+
+fromItems route feeds items =
+    feedAtRoute feeds route
+        |> List.filterMap (\x -> Dict.get x items)
 
 
 
@@ -191,21 +184,29 @@ headerLink currentRoute route =
 -- LIST VIEW
 
 
-listView : List Item -> Html Msg
+listView : List (RemoteData Item) -> Html Msg
 listView feed =
-    ul [ class "list-view" ] (List.indexedMap listViewItem feed)
+    Keyed.ul [ class "list-view" ] (List.indexedMap listViewItem feed)
 
 
-listViewItem : Int -> Item -> Html Msg
+listViewItem : Int -> RemoteData Item -> ( String, Html Msg )
 listViewItem index item =
-    li []
-        [ aside [] [ text (toString (index + 1)) ]
-        , div []
-            [ itemUrl item.id item.url item.title
-            , span [ class "domain" ] [ text item.domain ]
-            , itemFooter item
-            ]
-        ]
+    case item of
+        Success item ->
+            ( toString item.id
+            , li []
+                [ aside [] [ text (toString (index + 1)) ]
+                , div []
+                    [ itemUrl item.id item.url item.title
+                    , span [ class "domain" ] [ text "" ]
+                    , itemFooter item
+                    , text (toString item.id)
+                    ]
+                ]
+            )
+
+        _ ->
+            ( "", div [] [] )
 
 
 itemUrl : Int -> String -> String -> Html Msg
@@ -225,51 +226,46 @@ itemView item =
     article []
         [ section []
             [ h2 [] [ text item.title ]
-            , span [ class "domain" ] [ text item.domain ]
+            , span [ class "domain" ] [ text "" ]
             , itemFooter item
             ]
         , Markdown.toHtml [] item.content
-        , section [ class "comments-view" ]
-            [ commentsView (getComments item.comments)
-            ]
+
+        -- , section [ class "comments-view" ]
+        --     [ commentsView (getComments item.comments)
+        --     ]
         ]
 
 
 itemFooter : Item -> Html Msg
 itemFooter item =
     if item.type_ == "job" then
-        footer [] [ text item.timeAgo ]
+        footer [] [ text "" ]
     else
         footer []
             [ text (toString item.points ++ " points by ")
             , link (Route.User item.user) [ text item.user ]
-            , text (" " ++ item.timeAgo ++ " | ")
-            , link (Route.ItemRoute item.id) [ text (toString item.commentsCount ++ " comments") ]
+
+            -- , text (" " ++ item.timeAgo ++ " | ")
+            -- , link (Route.ItemRoute item.id) [ text (toString item.commentsCount ++ " comments") ]
             ]
 
 
 
 -- COMMENTS VIEW
-
-
-commentsView : List Item -> Html Msg
-commentsView comments =
-    ul [] (List.map commentView comments)
-
-
-commentView : Item -> Html Msg
-commentView item =
-    li []
-        [ div [ class "comment-meta" ]
-            [ link (Route.User item.user) [ text item.user ]
-            , text (" " ++ item.timeAgo)
-            ]
-        , Markdown.toHtml [] item.content
-        , commentsView (getComments item.comments)
-        ]
-
-
-
+-- commentsView : List Item -> Html Msg
+-- commentsView comments =
+--     ul [] (List.map commentView comments)
+-- commentView : Item -> Html Msg
+-- commentView item =
+--     li []
+--         [ div [ class "comment-meta" ]
+--             [ link (Route.User item.user) [ text item.user ]
+--             , text (" " ++ item.timeAgo)
+--             ]
+--         , Markdown.toHtml [] item.content
+--         , commentsView (getComments item.comments)
+--         ]
 -- USER VIEW
 
 
@@ -306,8 +302,8 @@ handleViewState successView remoteData =
         Loading ->
             loadingView
 
-        Failure e ->
-            errorView e
+        Failure ->
+            errorView
 
         Updating x ->
             div [] [ loadingView, successView x ]
@@ -326,27 +322,9 @@ notFoundView =
     div [ class "notification" ] [ text "404" ]
 
 
-errorView : Http.Error -> Html Msg
-errorView error =
-    let
-        message =
-            case error of
-                Timeout ->
-                    "Timeout"
-
-                NetworkError ->
-                    "You seem to be offline"
-
-                BadStatus x ->
-                    "The server gave me a " ++ toString x.status.code ++ " error"
-
-                BadPayload _ _ ->
-                    "The server gave me back something I did not expect"
-
-                _ ->
-                    "Woops"
-    in
-    div [ class "notification" ] [ text message ]
+errorView : Html Msg
+errorView =
+    div [ class "notification" ] [ text "error" ]
 
 
 link : Route -> List (Html Msg) -> Html Msg
@@ -384,15 +362,10 @@ toRequest model =
             { model | user = Loading } ! [ requestUser x ]
 
         ItemRoute x ->
-            case model.feed of
-                Success xs ->
-                    { model | item = itemFromFeed x xs } ! [ requestItem x ]
-
-                _ ->
-                    { model | item = Loading } ! [ requestItem x ]
+            { model | item = Loading } ! [ requestItem x ]
 
         _ ->
-            { model | feed = Loading } ! [ getPage "topstories" ]
+            model ! [ requestFeed (Route.toApi model.route) ]
 
 
 itemFromFeed : Int -> List Item -> RemoteData Item
@@ -408,81 +381,28 @@ itemFromFeed id feed =
 
 
 
--- HTTP
-
-
-endpoint : String
-endpoint =
-    "https://hnpwa.com/api/v0/"
-
-
-requestItem : Int -> Cmd Msg
-requestItem x =
-    Http.get (endpoint ++ "item/" ++ toString x ++ ".json") decodeItem
-        |> Http.send (toRemoteData >> GotItem)
-
-
-requestUser : String -> Cmd Msg
-requestUser x =
-    Http.get (endpoint ++ "user/" ++ x ++ ".json") decodeUser
-        |> Http.send (toRemoteData >> GotUser)
-
-
-requestFeed : Route -> Cmd Msg
-requestFeed route =
-    Http.get (endpoint ++ Route.toApi route ++ ".json") decodeFeed
-        |> Http.send (toRemoteData >> GotFeed)
-
-
-requestOterRoutes : Route -> Cmd Msg
-requestOterRoutes route =
-    let
-        routeToTask x =
-            Http.get (endpoint ++ Route.toApi x ++ ".json") decodeFeed
-                |> Http.toTask
-
-        routesToRequest =
-            [ Top, New, Ask, Show, Jobs ]
-                |> List.filter ((/=) route)
-                |> List.map routeToTask
-                |> Task.sequence
-    in
-    Task.attempt (\_ -> PreFetched) routesToRequest
-
-
-toRemoteData : Result Http.Error a -> RemoteData a
-toRemoteData result =
-    case result of
-        Err e ->
-            Failure e
-
-        Ok x ->
-            Success x
-
-
-
 --DECODERS
 
 
-decodeFeed : D.Decoder (List Item)
-decodeFeed =
-    D.list decodeItem
+decodeItem item =
+    case decodeValue itemDecoder item of
+        Ok item ->
+            GotItem (Success item)
+
+        Err _ ->
+            GotItem Failure
 
 
-decodeItem : D.Decoder Item
-decodeItem =
+itemDecoder : D.Decoder Item
+itemDecoder =
     P.decode Item
         |> P.required "id" D.int
         |> P.optional "title" D.string "No title"
-        |> P.optional "points" D.int 0
-        |> P.optional "user" D.string "No user found"
-        |> P.required "time_ago" D.string
+        |> P.optional "score" D.int 0
+        |> P.optional "by" D.string "No user found"
         |> P.optional "url" D.string ""
-        |> P.optional "domain" D.string ""
-        |> P.required "comments_count" D.int
-        |> P.optional "comments" decodeComments (Comments [])
-        |> P.optional "content" D.string ""
-        |> P.required "type" D.string
+        |> P.optional "text" D.string ""
+        |> P.optional "type" D.string ""
 
 
 decodeUser : D.Decoder User
@@ -496,7 +416,7 @@ decodeUser =
 
 decodeComments : Decoder Comments
 decodeComments =
-    D.map Comments (D.list (D.lazy (\_ -> decodeItem)))
+    D.map Comments (D.list (D.lazy (\_ -> itemDecoder)))
 
 
 
@@ -506,7 +426,7 @@ decodeComments =
 type RemoteData a
     = NotAsked
     | Loading
-    | Failure Http.Error
+    | Failure
     | Updating a
     | Success a
 
@@ -516,11 +436,7 @@ type alias Item =
     , title : String
     , points : Int
     , user : String
-    , timeAgo : String
     , url : String
-    , domain : String
-    , commentsCount : Int
-    , comments : Comments
     , content : String
     , type_ : String
     }

@@ -54,19 +54,19 @@ toRouteData : Route -> RouteData
 toRouteData route =
     case route of
         Top ->
-            RouteData "Top" "/" "news"
+            RouteData "Top" "/" "topstories"
 
         New ->
-            RouteData "New" "/new" "newest"
+            RouteData "New" "/new" "newstories"
 
         Ask ->
-            RouteData "Ask" "/ask" "ask"
+            RouteData "Ask" "/ask" "askstories"
 
         Show ->
-            RouteData "Show" "/show" "show"
+            RouteData "Show" "/show" "showstories"
 
         Jobs ->
-            RouteData "Jobs" "/jobs" "jobs"
+            RouteData "Jobs" "/jobs" "jobstories"
 
         ItemRoute x ->
             RouteData "Item" ("/item/" ++ toString x) "item"

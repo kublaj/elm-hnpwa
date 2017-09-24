@@ -1,5 +1,5 @@
 import 'style.scss';
-import 'register-sw.js';
+// import 'register-sw.js';
 import Firebase from 'firebase/app';
 import 'firebase/database';
 import { Main as Elm } from 'Main';
@@ -17,32 +17,17 @@ window.addEventListener("load", function() {
     document.querySelector(".notification").remove();
 });
 
-app.ports.getItem.subscribe(function(id) {
-    console.log(id)
-    getItem(id).then(function(item) {
-        // app.ports.suggestions.send(suggestions);
-        console.log(item.val())
+app.ports.requestItem.subscribe(function(id) {
+    api.child("item").child(id).on("value", function(item) {
+        console.log('onItem')
+        app.ports.itemSubscription.send(item.val());
     })
 });
 
-app.ports.getPage.subscribe(function(page) {
-    getPage(page).then(function(pageList) {
-        pageList.forEach(function(x) {
-            var id = parseInt(x);
-            console.log(x.val())
-            app.ports.gotId.send(x.val());
-        })
-    })
+app.ports.requestFeed.subscribe(function(feed) {
+    api.child(feed).once("value", function(x) {
+        console.log('onFeed')
+        app.ports.feedSubscription.send({feed: feed, data: x.val()});
+    });
 });
 
-function getPage(title) {
-    return api.child(title).once("value", function(snapshot) {
-        return snapshot.val();
-    });
-}
-
-function getItem(id) {
-    return api.child(id).on("value", function(snapshot) {
-        return snapshot.val();
-    });
-}
